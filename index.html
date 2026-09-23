@@ -209,7 +209,22 @@
     display:flex; align-items:center; justify-content:center;
   }
   .camara-wrap video{ width:100%; height:100%; object-fit:cover; }
-  .camara-hint{ text-align:center; font-size:13px; color:var(--tinta-suave); margin:12px 4px 0; }
+  .camara-hint{ text-align:center; font-size:13px; color:var(--tinta-suave); margin:12px 4px 0; line-height:1.5; }
+  .manual-zona{ text-align:center; margin-top:16px; }
+  .manual-link{
+    border:none; background:none; color:var(--azul); font-size:12.5px; font-weight:700;
+    text-decoration:underline; cursor:pointer; padding:6px;
+  }
+  .manual-form{ display:flex; gap:8px; margin-top:8px; }
+  #manualInput{
+    flex:1; border:2px solid var(--linea); border-radius:11px; padding:10px 12px;
+    font-family:'Inter',sans-serif; font-size:14.5px; outline:none;
+  }
+  #manualInput:focus{ border-color:var(--azul); }
+  #manualConfirmBtn{
+    border:none; background:var(--azul); color:var(--blanco); border-radius:11px;
+    padding:0 16px; font-weight:700; font-size:13px; cursor:pointer;
+  }
   .r-precio.tiene-barra::after{ content:"📷"; margin-left:6px; font-size:11px; }
 
   ::selection{ background:#FFD9B3; }
@@ -297,7 +312,14 @@
           <div class="camara-wrap">
             <video id="videoEscaneo" autoplay playsinline muted></video>
           </div>
-          <p class="camara-hint">Apuntá la cámara al código de barras del producto.</p>
+          <p class="camara-hint">Apuntá la cámara al código de barras del producto.<br>Sostenelo firme, a unos 10-15 cm, con buena luz.</p>
+          <div class="manual-zona">
+            <button type="button" class="manual-link" id="manualToggleBtn">¿No detecta el código? Ingresalo a mano</button>
+            <div class="manual-form" id="manualForm" style="display:none;">
+              <input type="text" inputmode="numeric" id="manualInput" placeholder="Número de código de barras">
+              <button type="button" id="manualConfirmBtn">Confirmar</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -330,6 +352,7 @@
     if(typeof v === 'number') return v;
     let s = String(v).trim();
     if(s === '') return NaN;
+    s = s.replace(/[^0-9.,-]/g, ''); // quita $ y cualquier otro símbolo o espacio
     s = s.replace(/\./g,'').replace(',', '.');
     return parseFloat(s);
   }
@@ -519,22 +542,73 @@
         const hoja = wb.Sheets[wb.SheetNames[0]];
         const filas = XLSX.utils.sheet_to_json(hoja, { header: 1, raw: true, defval: '' });
 
+        if(filas.length < 2){
+          toast('El archivo no tiene filas de datos.');
+          archivoInput.value = '';
+          return;
+        }
+
+        // Detecta las columnas por el título del encabezado (fila 1), en vez de asumir un orden fijo
+        const encabezado = filas[0] || [];
+        let idxCodigo = -1, idxDesc = -1, idxPrecio = -1, idxBarra = -1;
+        encabezado.forEach((h, i) => {
+          const t = normalizar(String(h || ''));
+          if(t.indexOf('barra') !== -1){ idxBarra = i; return; }
+          if(t.indexOf('codigo') !== -1){ idxCodigo = i; return; }
+          if(t.indexOf('descrip') !== -1){ idxDesc = i; return; }
+          if(t.indexOf('precio') !== -1 || t.indexOf('mayor') !== -1){ idxPrecio = i; return; }
+        });
+        // Si el encabezado no se reconoce, se asume el orden clásico según cantidad de columnas
+        if(idxDesc === -1 || idxPrecio === -1){
+          if(encabezado.length <= 2){ idxDesc = 0; idxPrecio = 1; idxCodigo = -1; idxBarra = -1; }
+          else { idxCodigo = 0; idxDesc = 1; idxPrecio = 2; idxBarra = encabezado.length >= 4 ? 3 : -1; }
+        }
+
+        const sinCodigo = idxCodigo === -1;
+        const patronPrecioEnDesc = /\$\s*([\d.,]+)\s*$/;
         const nuevaLista = [];
         for(let i = 1; i < filas.length; i++){
           const fila = filas[i];
-          if(!fila || fila.length < 3) continue;
-          const codigo = String(fila[0] !== undefined ? fila[0] : '').trim();
-          const desc = String(fila[1] !== undefined ? fila[1] : '').trim();
-          const mayor = parsePrecio(fila[2]);
-          const barra = String(fila[3] !== undefined ? fila[3] : '').trim();
-          if(!codigo || !desc || isNaN(mayor) || mayor <= 0) continue;
+          if(!fila) continue;
+          let desc = String(fila[idxDesc] !== undefined ? fila[idxDesc] : '').trim();
+          let mayor = parsePrecio(fila[idxPrecio]);
+          // Algunas filas traen el precio pegado al final de la descripción (error de formato del origen)
+          if(isNaN(mayor) || mayor <= 0){
+            const m = desc.match(patronPrecioEnDesc);
+            if(m){
+              mayor = parsePrecio(m[1]);
+              desc = desc.slice(0, m.index).trim();
+            }
+          }
+          const codigo = sinCodigo ? '' : String(fila[idxCodigo] !== undefined ? fila[idxCodigo] : '').trim();
+          const barra = idxBarra === -1 ? '' : String(fila[idxBarra] !== undefined ? fila[idxBarra] : '').trim();
+          if(!desc || isNaN(mayor) || mayor <= 0) continue;
+          if(!sinCodigo && !codigo) continue;
           if(esEncabezado(desc)) continue;
-          nuevaLista.push({ c: codigo, n: desc, p: calcularVenta(mayor), b: barra || null });
+          nuevaLista.push({ c: sinCodigo ? null : codigo, n: desc, p: calcularVenta(mayor), b: barra || null });
         }
 
         if(nuevaLista.length === 0){
           toast('No se encontraron productos válidos en el archivo.');
+          archivoInput.value = '';
           return;
+        }
+
+        // Si el archivo no trae columna de código, se reconcilia por DESCRIPCION contra la lista activa,
+        // así se conserva el código y el código de barra ya guardado de los productos que ya existían.
+        if(sinCodigo){
+          const porDescActual = new Map();
+          actual.forEach(p => { if(!porDescActual.has(p.norm)) porDescActual.set(p.norm, p); });
+          nuevaLista.forEach(p => {
+            const normDesc = normalizar(p.n);
+            const anterior = porDescActual.get(normDesc);
+            if(anterior){
+              p.c = anterior.c;
+              if(!p.b && anterior.b) p.b = anterior.b;
+            } else {
+              p.c = 'ND-' + normDesc.slice(0, 40) + '-' + Math.random().toString(36).slice(2, 7);
+            }
+          });
         }
 
         procesarNuevaLista(nuevaLista, file.name);
@@ -652,12 +726,31 @@
   const scanPickInput = document.getElementById('scanPickInput');
   const scanPickList = document.getElementById('scanPickList');
   const videoEscaneo = document.getElementById('videoEscaneo');
+  const manualToggleBtn = document.getElementById('manualToggleBtn');
+  const manualForm = document.getElementById('manualForm');
+  const manualInput = document.getElementById('manualInput');
+  const manualConfirmBtn = document.getElementById('manualConfirmBtn');
 
   let zxingReader = null;
   let productoParaAsignar = null;
+  let manejarCodigoDetectado = null;
 
   function getReader(){
-    if(!zxingReader) zxingReader = new ZXing.BrowserMultiFormatReader();
+    if(!zxingReader){
+      const hints = new Map();
+      // Solo formatos usados en productos de almacén/kiosco: acelera y afina el reconocimiento
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+        ZXing.BarcodeFormat.EAN_13,
+        ZXing.BarcodeFormat.EAN_8,
+        ZXing.BarcodeFormat.UPC_A,
+        ZXing.BarcodeFormat.UPC_E,
+        ZXing.BarcodeFormat.CODE_128,
+        ZXing.BarcodeFormat.CODE_39,
+        ZXing.BarcodeFormat.ITF
+      ]);
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      zxingReader = new ZXing.BrowserMultiFormatReader(hints);
+    }
     return zxingReader;
   }
 
@@ -667,8 +760,16 @@
 
   function iniciarCamara(onResult){
     const reader = getReader();
+    const restricciones = {
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        advanced: [{ focusMode: 'continuous' }]
+      }
+    };
     reader.decodeFromConstraints(
-      { video: { facingMode: { ideal: 'environment' } } },
+      restricciones,
       videoEscaneo,
       (resultado, err) => {
         if(resultado){
@@ -684,6 +785,8 @@
   function cerrarOverlayScan(){
     detenerEscaneo();
     overlayScan.classList.remove('abierto');
+    manualForm.style.display = 'none';
+    manualInput.value = '';
   }
 
   function buscarProductoPorBarra(barra){
@@ -723,9 +826,10 @@
     scanPickStep.style.display = 'none';
     scanCameraStep.style.display = 'block';
     overlayScanTitulo.textContent = 'Escaneá el código de "' + productoParaAsignar.n + '"';
+    manejarCodigoDetectado = (texto) => { asignarCodigoBarra(productoParaAsignar.c, texto); };
     iniciarCamara((texto) => {
       detenerEscaneo();
-      asignarCodigoBarra(productoParaAsignar.c, texto);
+      manejarCodigoDetectado(texto);
     });
   });
 
@@ -757,9 +861,10 @@
     scanPickStep.style.display = 'none';
     scanCameraStep.style.display = 'block';
     overlayScan.classList.add('abierto');
+    manejarCodigoDetectado = (texto) => { procesarBusquedaPorBarra(texto); };
     iniciarCamara((texto) => {
       detenerEscaneo();
-      procesarBusquedaPorBarra(texto);
+      manejarCodigoDetectado(texto);
     });
   });
 
@@ -775,6 +880,21 @@
 
   scanCerrarBtn.addEventListener('click', cerrarOverlayScan);
   overlayScan.addEventListener('click', (e) => { if(e.target === overlayScan) cerrarOverlayScan(); });
+
+  manualToggleBtn.addEventListener('click', () => {
+    const abierto = manualForm.style.display !== 'none';
+    manualForm.style.display = abierto ? 'none' : 'flex';
+    if(!abierto) manualInput.focus();
+  });
+
+  function confirmarManual(){
+    const valor = manualInput.value.trim();
+    if(!valor){ manualInput.focus(); return; }
+    detenerEscaneo();
+    if(manejarCodigoDetectado) manejarCodigoDetectado(valor);
+  }
+  manualConfirmBtn.addEventListener('click', confirmarManual);
+  manualInput.addEventListener('keydown', (e) => { if(e.key === 'Enter') confirmarManual(); });
 })();
 </script>
 </body>
